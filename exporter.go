@@ -3,22 +3,20 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
-	"net/http"
-	_ "net/http/pprof"
-	"os"
-	"os/user"
-	"runtime"
-	"sort"
-	"strings"
-
-	// Its important that we do these first so that we can register with the windows service control ASAP to avoid timeouts
-	"github.com/prometheus-community/windows_exporter/pkg/initiate"
+	"github.com/gin-gonic/gin"
+	"github.com/prometheus-community/windows_exporter/custom/router"
+	"github.com/prometheus-community/windows_exporter/custom/util"
 	winlog "github.com/prometheus-community/windows_exporter/pkg/log"
 	"github.com/prometheus-community/windows_exporter/pkg/types"
 	"github.com/prometheus-community/windows_exporter/pkg/utils"
 	"github.com/prometheus-community/windows_exporter/pkg/wmi"
+	"net/http"
+	_ "net/http/pprof"
+	"os"
+	"os/user"
+	"sort"
+	"strings"
 
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/go-kit/log/level"
@@ -26,7 +24,6 @@ import (
 	"github.com/prometheus-community/windows_exporter/pkg/config"
 	"github.com/prometheus-community/windows_exporter/pkg/log/flag"
 	"github.com/prometheus/common/version"
-	"github.com/prometheus/exporter-toolkit/web"
 	webflag "github.com/prometheus/exporter-toolkit/web/kingpinflag"
 )
 
@@ -171,75 +168,43 @@ func main() {
 
 	_ = level.Info(logger).Log("msg", fmt.Sprintf("Enabled collectors: %v", strings.Join(enabledCollectorList, ", ")))
 
-	http.HandleFunc(*metricsPath, withConcurrencyLimit(*maxRequests, collectors.BuildServeHTTP(*disableExporterMetrics, *timeoutMargin)))
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, err := fmt.Fprintln(w, `{"status":"ok"}`)
-		if err != nil {
-			_ = level.Debug(logger).Log("Failed to write to stream", "err", err)
-		}
+	r := gin.Default()
+	// init validator
+	util.RegValid()
+	r.GET(*metricsPath, func(c *gin.Context) {
+		withConcurrencyLimit(*maxRequests, collectors.BuildServeHTTP(*disableExporterMetrics, *timeoutMargin)).ServeHTTP(c.Writer, c.Request)
 	})
-	http.HandleFunc("/version", func(w http.ResponseWriter, r *http.Request) {
-		// we can't use "version" directly as it is a package, and not an object that
-		// can be serialized.
-		err := json.NewEncoder(w).Encode(prometheusVersion{
-			Version:   version.Version,
-			Revision:  version.Revision,
-			Branch:    version.Branch,
-			BuildUser: version.BuildUser,
-			BuildDate: version.BuildDate,
-			GoVersion: version.GoVersion,
+
+	r.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
+
+	r.GET("/version", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"version":   version.Version,
+			"revision":  version.Revision,
+			"branch":    version.Branch,
+			"buildUser": version.BuildUser,
+			"buildDate": version.BuildDate,
+			"goVersion": version.GoVersion,
 		})
-		if err != nil {
-			http.Error(w, fmt.Sprintf("error encoding JSON: %s", err), http.StatusInternalServerError)
-		}
 	})
-	if *metricsPath != "/" && *metricsPath != "" {
-		landingConfig := web.LandingConfig{
-			Name:        "Windows Exporter",
-			Description: "Prometheus Exporter for Windows servers",
-			Version:     version.Info(),
-			Links: []web.LandingLinks{
-				{
-					Address: *metricsPath,
-					Text:    "Metrics",
-				},
-				{
-					Address: "/health",
-					Text:    "Health Check",
-				},
-				{
-					Address: "/version",
-					Text:    "Version Info",
-				},
-			},
-		}
-		landingPage, err := web.NewLandingPage(landingConfig)
-		if err != nil {
-			_ = level.Error(logger).Log("msg", "failed to generate landing page", "err", err)
-			os.Exit(1)
-		}
-		http.Handle("/", landingPage)
+
+	router.RegisterRoutes(r)
+	runMode := SetEnvStr("GIN_MODE", "debug")
+	_ = os.Setenv("GIN_MODE", runMode)
+
+	if err = r.Run(*webConfig.WebListenAddresses...); err != nil {
+		_ = level.Error(logger).Log("msg", "cannot start windows_exporter", "err", err)
+		os.Exit(1)
 	}
+}
 
-	_ = level.Info(logger).Log("msg", "Starting windows_exporter", "version", version.Info())
-	_ = level.Info(logger).Log("msg", "Build context", "build_context", version.BuildContext())
-	_ = level.Debug(logger).Log("msg", "Go MAXPROCS", "procs", runtime.GOMAXPROCS(0))
-
-	go func() {
-		server := &http.Server{}
-		if err := web.ListenAndServe(server, webConfig, logger); err != nil {
-			_ = level.Error(logger).Log("msg", "cannot start windows_exporter", "err", err)
-			os.Exit(1)
-		}
-	}()
-
-	for {
-		if <-initiate.StopCh {
-			_ = level.Info(logger).Log("msg", "Shutting down windows_exporter")
-			break
-		}
+func SetEnvStr(env string, value string) string {
+	if e := os.Getenv(env); e != "" {
+		return e
 	}
+	return value
 }
 
 func withConcurrencyLimit(n int, next http.HandlerFunc) http.HandlerFunc {

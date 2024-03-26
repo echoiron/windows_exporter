@@ -4,6 +4,21 @@
 
 A Prometheus exporter for Windows machines.
 
+## upstream branch
+
+```bash
+git remote add upstream https://github.com/prometheus-community/windows_exporter.git
+```
+
+## Build binary
+```bash
+go build -o bg-remoteapp-monitor.exe exporter.go
+```
+
+## Upload minio
+```
+https://cache.wodcloud.com/vscode/desktop/remoteapp/bin/bg-remoteapp-monitor.exe
+```
 
 ## Collectors
 
